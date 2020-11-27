@@ -20,10 +20,12 @@ Displayed in https://www.tensorflow.org/datasets/catalog/.
 """
 
 import abc
+import html
 import textwrap
-from typing import List, Union
+from typing import List, Optional, Union
 
 import tensorflow_datasets as tfds
+from tensorflow_datasets.scripts.documentation import doc_utils
 
 
 Key = Union[int, str]
@@ -165,7 +167,7 @@ class VersionSection(Section):
 
   NAME = 'Versions'
 
-  def __init__(self, nightly_doc_util):
+  def __init__(self, nightly_doc_util: Optional[doc_utils.NightlyDocUtil]):
     self._nightly_doc_util = nightly_doc_util
 
   def _list_versions(self, builder: tfds.core.DatasetBuilder):
@@ -182,6 +184,7 @@ class VersionSection(Section):
         version_name = '`{}`'.format(str(v))
       if (
           v in curr_versions  # Filter versions only present in RELEASE_NOTES
+          and self._nightly_doc_util
           and self._nightly_doc_util.is_version_nightly(builder, str(v))
       ):
         nightly_str = ' ' + self._nightly_doc_util.icon
@@ -442,7 +445,7 @@ def _display_builder(
 
 
 def _display_all_builders(
-    nightly_doc_util,
+    nightly_doc_util: Optional[doc_utils.NightlyDocUtil],
     builders: List[tfds.core.DatasetBuilder],
     all_sections: List[Section],
 ) -> str:
@@ -461,8 +464,10 @@ def _display_all_builders(
   unique_builder_str = []
   for i, builder in enumerate(builders):
     header_suffix = ' (default config)' if i == 0 else ''
-    nightly_str = (' ' + nightly_doc_util.icon) \
-        if nightly_doc_util.is_config_nightly(builder) else ''
+    if nightly_doc_util and nightly_doc_util.is_config_nightly(builder):
+      nightly_str = ' ' + nightly_doc_util.icon
+    else:
+      nightly_str = ''
     unique_builder_str.append(
         f'## {builder.name}/{builder.builder_config.name}'
         f'{header_suffix}{nightly_str}\n')
@@ -479,14 +484,17 @@ def _display_dataset_heading(builder: tfds.core.DatasetBuilder):
   return f'# `{builder.name}`'
 
 
-def _display_nightly_str(nightly_doc_util, builder: tfds.core.DatasetBuilder):
+def _display_nightly_str(
+    nightly_doc_util: Optional[doc_utils.NightlyDocUtil],
+    builder: tfds.core.DatasetBuilder,
+) -> str:
   """Header nightly note section."""
-  if nightly_doc_util.is_builder_nightly(builder):
+  if nightly_doc_util and nightly_doc_util.is_builder_nightly(builder):
     return f"""\
       Note: This dataset was added recently and is only available in our
       `tfds-nightly` package  {nightly_doc_util.icon}.
       """
-  elif nightly_doc_util.has_nightly(builder):
+  elif nightly_doc_util and nightly_doc_util.has_nightly(builder):
     return f"""\
       Note: This dataset has been updated since the last stable release.
       The new versions and config marked with {nightly_doc_util.icon}
@@ -517,12 +525,75 @@ def _display_builder_configs(
   return _display_all_builders(nightly_doc_util, config_builders, all_sections)
 
 
+def _escape(val: str) -> str:
+  val = html.escape(val, quote=True)
+  val = val.replace('\n', '&#10;')
+  val = val.strip()
+  return val
+
+
+def _display_schema_org(
+    builder: tfds.core.DatasetBuilder,
+    visu_doc_util: Optional[doc_utils.VisualizationDocUtil],
+) -> str:
+  r"""Builds schema.org microdata for DatasetSearch from DatasetBuilder.
+
+  Specs: https://developers.google.com/search/docs/data-types/dataset#dataset
+  Testing tool: https://search.google.com/structured-data/testing-tool
+  For Google Dataset Search: https://toolbox.google.com/datasetsearch
+
+  Microdata format was chosen over JSON-LD due to the fact that Markdown
+  rendering engines remove all \<script\> tags.
+
+  Args:
+    builder: Dataset to document
+    visu_doc_util: Visualization util
+
+  Returns:
+    schema_org: The schema.org
+  """
+  description = f"""
+
+  To use this dataset:
+
+  ```python
+  import tensorflow_datasets as tfds
+
+  ds = tfds.load('{builder.info.name}', split='train')
+  for ex in ds.take(4):
+    print(ex)
+  ```
+
+  See [the guide](https://www.tensorflow.org/datasets/overview) for more
+  informations on [tensorflow_datasets](https://www.tensorflow.org/datasets).
+
+  """
+  description = builder.info.description + textwrap.dedent(description)
+  if visu_doc_util and visu_doc_util.has_visualization(builder):
+    description += visu_doc_util.get_html_tag(builder) + '\n\n'
+
+  text = f"""\
+  <div itemscope itemtype="http://schema.org/Dataset">
+    <div itemscope itemprop="includedInDataCatalog" itemtype="http://schema.org/DataCatalog">
+      <meta itemprop="name" content="TensorFlow Datasets" />
+    </div>
+    <meta itemprop="name" content="{builder.info.name}" />
+    <meta itemprop="description" content="{_escape(description)}" />
+    <meta itemprop="url" content="https://www.tensorflow.org/datasets/catalog/{builder.info.name}" />
+    <meta itemprop="sameAs" content="{_escape(builder.info.homepage)}" />
+    <meta itemprop="citation" content="{_escape(builder.info.citation)}" />
+  </div>
+  """
+  text = textwrap.dedent(text)
+  return text
+
+
 def get_markdown_string(
     builder: tfds.core.DatasetBuilder,
     config_builders: List[tfds.core.DatasetBuilder],
-    visu_doc_util,
-    df_doc_util,
-    nightly_doc_util,
+    visu_doc_util: Optional[doc_utils.VisualizationDocUtil],
+    df_doc_util: Optional[doc_utils.DataframeDocUtil],
+    nightly_doc_util: Optional[doc_utils.NightlyDocUtil],
 ) -> str:
   """Build the dataset markdown."""
 
@@ -540,11 +611,14 @@ def get_markdown_string(
       FeatureInfoSection(),
       SupervisedKeySection(),
       DatasetCitationSection(),
-      DatasetVisualizationSection(visu_doc_util),
-      DatasetDataframeSection(df_doc_util),
   ]
+  if visu_doc_util:
+    all_sections.append(DatasetVisualizationSection(visu_doc_util))
+  if df_doc_util:
+    all_sections.append(DatasetDataframeSection(df_doc_util))
 
   doc_str = [
+      _display_schema_org(builder, visu_doc_util),
       _display_dataset_heading(builder),
       _display_nightly_str(nightly_doc_util, builder),
       _display_manual_instructions(builder),
@@ -552,5 +626,4 @@ def get_markdown_string(
           builder, nightly_doc_util, config_builders, all_sections
       ),
   ]
-
   return '\n\n'.join([tfds.core.utils.dedent(s) for s in doc_str if s])
